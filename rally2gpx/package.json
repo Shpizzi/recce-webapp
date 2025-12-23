@@ -1,0 +1,16 @@
+{
+  "name": "rally2gpx",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Generate GPX tracks from rally-maps.com",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "puppeteer": "^22.8.2",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "gpx-builder": "^2.0.0"
+  }
+}

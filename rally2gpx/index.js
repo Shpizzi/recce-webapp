@@ -1,0 +1,133 @@
+const fs = require('fs');
+const puppeteer = require('puppeteer-extra');
+const inquirer = require('inquirer');
+const { buildGPX, BaseBuilder } = require('gpx-builder');
+const { Point, Metadata, Person } = BaseBuilder.MODELS;
+
+puppeteer.use(require('puppeteer-extra-plugin-stealth')());
+
+/* AUX FUNCTIONS */
+
+const showHelp = function () {
+  const path = require('path');
+  console.log(`Usage: ${path.basename(process.argv[0])} ${path.basename(process.argv[1])} URL`);
+};
+
+const stagePicker = function (stages) {
+  return new Promise((resolve, reject) => {
+    inquirer.prompt([
+      {
+        type: 'list',
+        name: 'stage',
+        message: 'What stage do you wish to generate the GPX',
+        choices: stages,
+        default: 0
+      }
+    ]).then(answers => resolve(stages[answers.stage]));
+  });
+};
+
+const generateGPX = function (stage) {
+  const points = [];
+  const gpxData = new BaseBuilder();
+
+  for (let i = 0; i < stage.coordinates.length; i++) {
+    points.push(new Point(stage.coordinates[i][1], stage.coordinates[i][0]));
+  }
+
+  gpxData.setMetadata(new Metadata({
+    name: stage.short,
+    desc: `WRC track extracted for stage ${stage.name}`,
+    author: new Person({
+      name: 'crazyfacka'
+    })
+  }));
+
+  gpxData.setSegmentPoints(points);
+
+  const path = require('path');
+  const os = require('os');
+
+  const desktopPath = path.join(os.homedir(), 'Desktop');
+  const safeName = stage.short.toLowerCase().replace(/[^a-z0-9]/gi, '-');
+  const filename = `${safeName}.gpx`;
+  const outputPath = path.join(desktopPath, filename);
+
+  fs.writeFile(outputPath, buildGPX(gpxData.toObject()), 'utf8', (err) => {
+    if (err) {
+      console.log(`Error writing GPX data to ${outputPath}`);
+      process.exit(1);
+    }
+
+    console.log(`✅ GPX salvato su Desktop: ${outputPath}`);
+  });
+};
+
+/* THE MACHINE */
+
+async function scrapePage (url) {
+  const browser = await puppeteer.launch({
+    headless: 'new'
+  });
+  const page = await browser.newPage();
+
+  await page.setViewport({ width: 1080, height: 1024 });
+  await page.goto(url);
+
+  // cc.acceptCategory('all');
+
+  try {
+    await page.waitForSelector('.fc-cta-consent', { timeout: 5000 });
+    await page.click('.fc-cta-consent');
+  } catch (e) { }
+
+  await page.waitForSelector('.cm__body');
+  await page.click('.cm__btn >>> ::-p-text(Accept All)');
+
+  await page.waitForSelector('.leaflet-control-container');
+  await page.waitForNetworkIdle();
+  await page.waitForFunction('window?.sl?.leaflet?.data?.storage?.stages');
+
+  const stages = await page.evaluate(() => {
+    function flattenStages () {
+      const simpleStages = [];
+      for (let i = 0; i < sl.leaflet.data.storage.stages.length; i++) {
+        const curStage = sl.leaflet.data.storage.stages[i];
+        let coordinates;
+        for (let j = 0; j < curStage.geometries.length; j++) {
+          if (curStage.geometries[j].type === 'SL' || curStage.geometries[j].type === 'PL') {
+            coordinates = curStage.geometries[j].geometry.coordinates;
+          }
+        }
+        simpleStages[i] = {
+          value: i,
+          name: curStage.fullName,
+          short: curStage.name,
+          coordinates: coordinates
+        };
+      }
+      return simpleStages;
+    }
+    return flattenStages();
+  });
+
+  await browser.close();
+
+  return stages;
+}
+
+const args = process.argv.slice(2);
+if (args.length !== 1) {
+  showHelp();
+  process.exit(1);
+}
+
+console.log(`Downloading and parsing data from '${args[0]}'`);
+
+scrapePage(args[0])
+  .then(stages => stagePicker(stages))
+  .then(stage => generateGPX(stage))
+  .catch(err => {
+    console.log(err);
+  });
+
