@@ -232,122 +232,222 @@ def parse_coords_auto(path):
         raise ValueError("KML/GPX non riconosciuto: nessun LineString (KML) o trkpt (GPX) trovato.")
     return coords
 
-def write_points_kml(points, out_path, name="Curve"):
-    def placemark(p):
+def simplify_coords(coords, epsilon=0.0001):
+    """Algoritmo Ramer-Douglas-Peucker per ridurre il numero di punti."""
+    if len(coords) < 3:
+        return coords
+
+    dmax = 0
+    index = 0
+    end = len(coords) - 1
+    
+    # Calcola la distanza massima dal segmento formato dai punti estremi
+    for i in range(1, end):
+        d = perpendicular_distance(coords[i], coords[0], coords[end])
+        if d > dmax:
+            index = i
+            dmax = d
+
+    if dmax > epsilon:
+        # Se la distanza è maggiore di epsilon, dividi ricorsivamente
+        recursive1 = simplify_coords(coords[:index+1], epsilon)
+        recursive2 = simplify_coords(coords[index:], epsilon)
+        return recursive1[:-1] + recursive2
+    else:
+        return [coords[0], coords[end]]
+
+def perpendicular_distance(p, p1, p2):
+    """Calcola la distanza perpendicolare di un punto p da una linea definita da p1 e p2."""
+    if p1 == p2:
+        return haversine_m(p, p1)
+    
+    # Approssimazione planare locale per velocità (valido per piccole distanze)
+    lat1, lon1 = math.radians(p1[1]), math.radians(p1[0])
+    lat2, lon2 = math.radians(p2[1]), math.radians(p2[0])
+    lat, lon = math.radians(p[1]), math.radians(p[0])
+    
+    y = lon - lon1
+    x = lat - lat1
+    dy = lon2 - lon1
+    dx = lat2 - lat1
+    
+    t = (x * dx + y * dy) / (dx * dx + dy * dy)
+    t = max(0, min(1, t))
+    
+    dist_lat = lat - (lat1 + t * dx)
+    dist_lon = (lon - (lon1 + t * dy)) * math.cos(lat1)
+    
+    return math.sqrt(dist_lat**2 + dist_lon**2) * 6371000
+
+def write_kml(points, track_coords, out_path, name="Percorso Rally"):
+    points_kml = []
+    for p in points:
         name_esc = xml_escape(p.get('name','Curve'))
         desc_esc = xml_escape(p.get('desc',''))
-        return f"""
+        points_kml.append(f"""
         <Placemark>
-          <styleUrl>#binoc</styleUrl>
           <name>{name_esc}</name>
           <description>{desc_esc}</description>
+          <styleUrl>#binoc</styleUrl>
           <Point><coordinates>{p['lon']},{p['lat']},0</coordinates></Point>
-        </Placemark>
-        """.strip()
+        </Placemark>""")
+
+    track_str = " ".join([f"{lon},{lat},0" for lon, lat in track_coords])
+    
     kml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
 <Document>
   <name>{xml_escape(name)}</name>
   <Style id="binoc">
     <IconStyle>
-      <scale>1.0</scale>
-      <Icon>
-        <href>http://maps.google.com/mapfiles/kml/shapes/binoculars.png</href>
-      </Icon>
+      <scale>0.8</scale>
+      <Icon><href>http://maps.google.com/mapfiles/kml/shapes/binoculars.png</href></Icon>
     </IconStyle>
   </Style>
-  {"".join(placemark(p) for p in points)}
+  <Style id="lineStyle">
+    <LineStyle>
+      <color>ff0000ff</color>
+      <width>4</width>
+    </LineStyle>
+  </Style>
+  <Folder>
+    <name>Punti di Corda</name>
+    {"".join(points_kml)}
+  </Folder>
+  <Placemark>
+    <name>Tracciato</name>
+    <styleUrl>#lineStyle</styleUrl>
+    <LineString>
+      <tessellate>1</tessellate>
+      <coordinates>{track_str}</coordinates>
+    </LineString>
+  </Placemark>
 </Document>
-</kml>
-"""
+</kml>"""
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(kml)
 
-def write_points_gpx(points, out_path, name="Curve"):
-    parts = []
+def write_gpx(points, track_coords, out_path, name="Percorso Rally"):
+    wpt_parts = []
     for p in points:
         nm = xml_escape(p.get("name","Curve"))
         ds = xml_escape(p.get("desc",""))
-        parts.append(f'<wpt lat="{p["lat"]}" lon="{p["lon"]}"><name>{nm}</name><desc>{ds}</desc></wpt>')
+        wpt_parts.append(f'<wpt lat="{p["lat"]}" lon="{p["lon"]}"><name>{nm}</name><desc>{ds}</desc></wpt>')
+    
+    trkpts = "".join([f'<trkpt lat="{lat}" lon="{lon}"></trkpt>' for lon, lat in track_coords])
+    
     gpx = f'''<?xml version="1.0" encoding="UTF-8"?>
 <gpx version="1.1" creator="curve_detector" xmlns="http://www.topografix.com/GPX/1/1">
   <metadata><name>{xml_escape(name)}</name></metadata>
-  {''.join(parts)}
+  {"".join(wpt_parts)}
+  <trk>
+    <name>Tracciato</name>
+    <trkseg>
+      {trkpts}
+    </trkseg>
+  </trk>
 </gpx>
 '''
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(gpx)
 
 def main():
-    ap=argparse.ArgumentParser(description="Crea geotag su curve da KML/GPX.")
+    ap=argparse.ArgumentParser(description="Crea geotag su curve e semplifica tracciato.")
     ap.add_argument("in_path", help="Input .gpx o .kml")
-    ap.add_argument("out_path", help="Output .kml o .gpx (deciso dall’estensione)")
-    ap.add_argument("--threshold", type=float, default=15.0, help="Soglia svolta in gradi (default 15)")
-    ap.add_argument("--step", type=float, default=5.0, help="Densificazione (m) per segmenti lunghi (default 5)")
-    ap.add_argument("--minsep", type=float, default=35.0, help="Distanza minima (m) tra curve successive (default 35)")
-    ap.add_argument("--baseline", type=float, default=35.0, help="Distanza (m) prima/dopo il punto per stimare l'angolo firmato (default 35)")
+    ap.add_argument("out_path", help="Output .kml o .gpx")
+    ap.add_argument("--threshold", type=float, default=15.0, help="Soglia svolta in gradi per inizio curva (default 15)")
+    ap.add_argument("--step", type=float, default=5.0, help="Densificazione (m) per calcolo (default 5)")
+    ap.add_argument("--minsep", type=float, default=35.0, help="Distanza minima (m) tra curve (default 35)")
+    ap.add_argument("--baseline", type=float, default=35.0, help="Finestra metrica stima angolo (default 35)")
+    ap.add_argument("--simplify", type=float, default=1.5, help="Tolleranza semplificazione tracciato in metri (default 1.5)")
+    ap.add_argument("--min-straight", type=float, default=150.0, help="Lunghezza minima per considerare un rettilineo (default 150m)")
     args=ap.parse_args()
 
-    coords = parse_coords_auto(args.in_path)
-    if len(coords) < 3:
-        raise ValueError("Tracciato troppo corto (<3 punti).")
-    coords = densify(coords, step_m=args.step)
+    raw_coords = parse_coords_auto(args.in_path)
+    if len(raw_coords) < 3:
+        raise ValueError("Tracciato troppo corto.")
 
-    curve_pts=[]; last_kept=None
-    i = 1
-    n = len(coords)
+    # 1. Tracciato completo semplificato
+    epsilon = args.simplify * 0.00001
+    simplified_track = simplify_coords(raw_coords, epsilon=epsilon)
+
+    # 2. Calcolo Punti (solo Tornanti e Rettilinei)
+    calc_coords = densify(raw_coords, step_m=args.step)
+    curve_pts = []
+    i, n = 1, len(calc_coords)
+    
+    last_event_m = 0.0 # Distanza dall'ultimo evento (curva o inizio rettilineo)
+    in_straight_since = 0 # Indice di inizio potenziale rettilineo
+    dist_accum = 0.0
+
     while i < n-1:
-        ang_signed = turn_angle_signed_deg_window(coords, i, back_m=args.baseline, fwd_m=args.baseline)
+        ang_signed = turn_angle_signed_deg_window(calc_coords, i, back_m=args.baseline, fwd_m=args.baseline)
         t = abs(ang_signed)
-        if t >= args.threshold:
-            # entra in cluster: scorri fino a uscire dalla soglia, tenendo il max
-            max_t = t
-            max_i = i
+        
+        # LOGICA TORNANTI
+        if t >= 140: # Abbassiamo un po' la soglia per prendere tutti i tornanti
+            # Cerchiamo l'apice del tornante nel cluster
+            max_t, max_i = t, i
             j = i + 1
             while j < n-1:
-                ang_j_signed = turn_angle_signed_deg_window(coords, j, back_m=args.baseline, fwd_m=args.baseline)
-                tj = abs(ang_j_signed)
-                if tj < args.threshold:
-                    break
-                if tj > max_t:
-                    max_t = tj
-                    max_i = j
+                tj = abs(turn_angle_signed_deg_window(calc_coords, j, back_m=args.baseline, fwd_m=args.baseline))
+                if tj < 40: break # Esci se la curva finisce
+                if tj > max_t: max_t, max_i = tj, j
                 j += 1
-            # usa il punto di massimo (punto di corda) se rispetta la distanza minima
-            apex = coords[max_i]
-            if last_kept is None or haversine_m(apex, last_kept) >= args.minsep:
-                ang_signed_apex = turn_angle_signed_deg_window(coords, max_i, back_m=args.baseline, fwd_m=args.baseline)
-                t_apex = abs(ang_signed_apex)
-                categoria = classify_curve(t_apex)
-                dir_lbl = "Sinistra" if ang_signed_apex > 0 else ("Destra" if ang_signed_apex < 0 else "—")
-                evol = curve_evolution(coords, max_i, lookahead_m=40.0, delta_deg=15.0, baseline_m=args.baseline)
-                lat_i = apex[1]
-                lon_i = apex[0]
-                sv = street_view_url(lat_i, lon_i)
-                title = f"{dir_lbl} {categoria}"
-                if evol:
-                    title += f" {evol}"
-                curve_pts.append({
-                    "lon": lon_i,
-                    "lat": lat_i,
-                    "name": title,
-                    "desc": (
-                        f"Svolta ≈ {t_apex:.1f}°\nStreet View: {sv}"
-                    )
-                })
-                last_kept = apex
-            # salta al termine del cluster
+            
+            apex = calc_coords[max_i]
+            curve_pts.append({
+                "lon": apex[0], "lat": apex[1],
+                "name": "TORNANTE",
+                "desc": f"Angolo ≈ {max_t:.1f}°\nStreet View: {street_view_url(apex[1], apex[0])}"
+            })
             i = j
+            in_straight_since = i
+            dist_accum = 0.0
+            continue
+
+        # LOGICA RETTILINEI
+        # Se l'angolo è molto basso (< 5 gradi), accumuliamo distanza
+        if t < 7.0:
+            if i > 0:
+                dist_accum += haversine_m(calc_coords[i-1], calc_coords[i])
+            
+            # Se raggiungiamo la soglia del rettilineo lungo
+            if dist_accum >= args.min_straight:
+                start_pt = calc_coords[in_straight_since]
+                # Aggiungiamo un punto a metà del rettilineo
+                mid_idx = in_straight_since + (i - in_straight_since) // 2
+                mid_pt = calc_coords[mid_idx]
+                
+                # Verifichiamo di non aver già messo un rettilineo troppo vicino
+                already_exists = False
+                for p in curve_pts:
+                    if p["name"].startswith("RETTILINEO") and haversine_m(mid_pt, (p["lon"], p["lat"])) < args.min_straight:
+                        already_exists = True; break
+                
+                if not already_exists:
+                    curve_pts.append({
+                        "lon": mid_pt[0], "lat": mid_pt[1],
+                        "name": f"RETTILINEO ({int(dist_accum)}m)",
+                        "desc": f"Tratto dritto di circa {int(dist_accum)} metri."
+                    })
+                # Reset accumulo per cercare il prossimo o estendere questo
+                # (In realtà non resettiamo dist_accum per non duplicare, 
+                # ma mettiamo solo un punto per ogni tratto lungo)
         else:
-            i += 1
-    name=f"Curve (≥ {args.threshold}°)"
+            # Se la strada curva (> 7 gradi), resettiamo il rettilineo
+            dist_accum = 0.0
+            in_straight_since = i
+            
+        i += 1
+
     ext = os.path.splitext(args.out_path.lower())[1]
     if ext == ".gpx":
-        write_points_gpx(curve_pts, args.out_path, name=name)
+        write_gpx(curve_pts, simplified_track, args.out_path, name=os.path.basename(args.in_path))
     else:
-        write_points_kml(curve_pts, args.out_path, name=name)
+        write_kml(curve_pts, simplified_track, args.out_path, name=os.path.basename(args.in_path))
 
-    print(f"Creati {len(curve_pts)} punti curva → {os.path.abspath(args.out_path)}")
+    print(f"Creati {len(curve_pts)} punti (Tornanti/Rettilinei) e tracciato semplificato ({len(simplified_track)} punti) -> {args.out_path}")
 
 if __name__ == "__main__":
     try:
